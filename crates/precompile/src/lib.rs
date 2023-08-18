@@ -1,7 +1,6 @@
-#![no_std]
-
 mod blake2;
 mod bn128;
+mod cait_sith_key_deriver;
 mod hash;
 mod identity;
 mod modexp;
@@ -125,6 +124,7 @@ impl Precompiles {
                 hash::SHA256,
                 hash::RIPEMD160,
                 identity::FUN,
+                cait_sith_key_deriver::DERIVE_CAIT_SITH_PUBKEY,
             ]
             .into_iter()
             .map(From::from)
