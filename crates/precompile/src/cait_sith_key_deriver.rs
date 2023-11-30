@@ -17,7 +17,7 @@ pub const DERIVE_CAIT_SITH_PUBKEY: PrecompileAddress = PrecompileAddress(
 const MIN_LENGTH: usize = 81;
 
 fn derive_cait_sith_pubkey(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    println!("derive_cait_sith_pubkey");
+    println!("Lit Precompile: derive_cait_sith_pubkey");
     let gas_used = calc_linear_cost_u32(input.len(), IDENTITY_BASE, IDENTITY_PER_WORD);
     if gas_used > gas_limit {
         return Err(Error::OutOfGas);
