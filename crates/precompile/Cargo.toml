@@ -18,6 +18,7 @@ ecdsa = "0.16.8"
 elliptic-curve = { version = "0.13.5", features = ["arithmetic", "hash2curve"] }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic", "expose-field", "hash2curve"] }
 num = { version = "0.4.0", default-features = false, features = ["alloc"] }
 num-bigint = "0.4.4"
 once_cell = { version = "1.17", default-features = false, features = ["alloc"] }

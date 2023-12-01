@@ -178,8 +178,7 @@ impl EcOperation {
 }
 
 fn ec_operation(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    println!("Lit Precompile: ec_operation");
-    if input.len() < 1 {
+    if input.is_empty() {
         return Err(Error::EcOpsInvalidOperation);
     }
     for i in 0..input.len() {
@@ -187,7 +186,7 @@ fn ec_operation(input: &[u8], gas_limit: u64) -> PrecompileResult {
             return operation.execute(&input[i + 1..], gas_limit);
         }
     }
-    return Err(Error::EcOpsInvalidOperation);
+    Err(Error::EcOpsInvalidOperation)
 }
 
 const CURVE_NAME_SECP256K1: &[u8] = &[
@@ -197,6 +196,10 @@ const CURVE_NAME_SECP256K1: &[u8] = &[
 const CURVE_NAME_PRIME256V1: &[u8] = &[
     236, 151, 14, 250, 71, 58, 162, 250, 152, 240, 56, 58, 218, 26, 64, 52, 15, 149, 88, 58, 236,
     119, 101, 93, 71, 74, 121, 18, 49, 68, 120, 167,
+];
+const CURVE_NAME_SECP384R1: &[u8] = &[
+    186, 177, 41, 47, 70, 175, 220, 252, 148, 37, 181, 41, 191, 16, 142, 88, 170, 179, 147, 33,
+    237, 86, 1, 244, 50, 172, 231, 197, 128, 13, 102, 124,
 ];
 const CURVE_NAME_CURVE25519: &[u8] = &[
     95, 235, 190, 179, 75, 175, 72, 27, 200, 83, 4, 244, 249, 232, 242, 193, 145, 139, 223, 192,
@@ -269,32 +272,30 @@ trait EcOps {
             }
             match &data[i..i + 32] {
                 CURVE_NAME_SECP256K1 => {
-                    println!("secp256k1");
                     let result = self.secp256k1(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
                 CURVE_NAME_PRIME256V1 => {
-                    println!("prime256v1");
                     let result = self.prime256v1(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
+                CURVE_NAME_SECP384R1 => {
+                    let result = self.secp384r1(&data[i + 32..])?;
+                    return Ok((gas_used, result));
+                }
                 CURVE_NAME_CURVE25519 => {
-                    println!("curve25519");
                     let result = self.curve25519(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
                 CURVE_NAME_BLS12381G1 => {
-                    println!("bls12381g1");
                     let result = self.bls12381g1(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
                 CURVE_NAME_BLS12381G2 => {
-                    println!("bls12381g2");
                     let result = self.bls12381g2(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
                 CURVE_NAME_BLS12381GT => {
-                    println!("bls12381gt");
                     let result = self.bls12381g1(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
@@ -306,6 +307,7 @@ trait EcOps {
     }
     fn secp256k1(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
     fn prime256v1(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
     fn bls12381g1(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
     fn bls12381g2(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
@@ -491,6 +493,97 @@ fn prime256v1_scalars(data: &[u8], scalar_cnt: usize) -> Result<(&[u8], Vec<p256
     Ok((&data[32 * scalar_cnt..], scalars))
 }
 
+fn secp384r1_points(
+    data: &[u8],
+    point_cnt: usize,
+) -> Result<(&[u8], Vec<p384::ProjectivePoint>), Error> {
+    use elliptic_curve::sec1::FromEncodedPoint;
+
+    if 96 * point_cnt > data.len() {
+        return Err(Error::EcOpsInvalidPoint);
+    }
+
+    let mut offset = 0;
+    let mut points = Vec::with_capacity(point_cnt);
+    while offset < data.len() && points.len() < point_cnt {
+        let point = match data[offset] {
+            0x04 => {
+                // Uncompressed form
+                if offset + 97 > data.len() {
+                    return Err(Error::EcOpsInvalidPoint);
+                }
+                let encoded_point =
+                    elliptic_curve::sec1::EncodedPoint::<p384::NistP384>::from_bytes(
+                        &data[offset..offset + 97],
+                    )
+                    .map_err(|_| Error::EcOpsInvalidPoint)?;
+                let point = p384::AffinePoint::from_encoded_point(&encoded_point)
+                    .map(p384::ProjectivePoint::from);
+                let point = Option::<p384::ProjectivePoint>::from(point);
+
+                offset += 97;
+                point
+            }
+            0x03 | 0x02 => {
+                // Compressed form
+                if offset + 49 > data.len() {
+                    return Err(Error::EcOpsInvalidPoint);
+                }
+                let encoded_point =
+                    elliptic_curve::sec1::EncodedPoint::<p384::NistP384>::from_bytes(
+                        &data[offset..offset + 49],
+                    )
+                    .map_err(|_| Error::EcOpsInvalidPoint)?;
+                let point = p384::AffinePoint::from_encoded_point(&encoded_point)
+                    .map(p384::ProjectivePoint::from);
+                let point = Option::<p384::ProjectivePoint>::from(point);
+                offset += 49;
+                point
+            }
+            _ => {
+                if offset + 96 > data.len() {
+                    return Err(Error::EcOpsInvalidPoint);
+                }
+                let mut tmp = [4u8; 97];
+                tmp[1..].copy_from_slice(&data[offset..offset + 96]);
+                let encoded_point =
+                    elliptic_curve::sec1::EncodedPoint::<p384::NistP384>::from_bytes(&tmp[..])
+                        .map_err(|_| Error::EcOpsInvalidPoint)?;
+                let point = p384::AffinePoint::from_encoded_point(&encoded_point)
+                    .map(p384::ProjectivePoint::from);
+                let point = Option::<p384::ProjectivePoint>::from(point);
+                offset += 96;
+                point
+            }
+        };
+        if point.is_none() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        points.push(point.unwrap());
+    }
+
+    if points.len() != point_cnt {
+        return Err(Error::EcOpsInvalidPoint);
+    }
+    Ok((&data[96 * point_cnt..], points))
+}
+
+fn secp384r1_scalars(data: &[u8], scalar_cnt: usize) -> Result<(&[u8], Vec<p384::Scalar>), Error> {
+    if 48 * scalar_cnt > data.len() {
+        return Err(Error::EcOpsInvalidScalar);
+    }
+    let mut scalars = Vec::with_capacity(scalar_cnt);
+    for i in 0..scalar_cnt {
+        let mut repr = <p384::Scalar as PrimeField>::Repr::default();
+        <<p384::Scalar as PrimeField>::Repr as AsMut<[u8]>>::as_mut(&mut repr)
+            .copy_from_slice(&data[48 * i..48 * (i + 1)]);
+        let scalar = Option::<p384::Scalar>::from(p384::Scalar::from_repr(repr))
+            .ok_or(Error::EcOpsInvalidScalar)?;
+        scalars.push(scalar);
+    }
+    Ok((&data[48 * scalar_cnt..], scalars))
+}
+
 fn curve25519_points(data: &[u8], point_cnt: usize) -> Result<(&[u8], Vec<EdwardsPoint>), Error> {
     if 64 * point_cnt > data.len() {
         return Err(Error::EcOpsInvalidPoint);
@@ -640,6 +733,10 @@ fn prime256v1_point_out(point: &p256::ProjectivePoint) -> Vec<u8> {
     point.to_encoded_point(false).as_bytes()[1..].to_vec()
 }
 
+fn secp384r1_point_out(point: &p384::ProjectivePoint) -> Vec<u8> {
+    point.to_affine().to_encoded_point(false).as_bytes()[1..].to_vec()
+}
+
 fn curve25519_point_out(point: &curve25519_dalek::EdwardsPoint) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     out[32..].copy_from_slice(point.compress().as_bytes());
@@ -685,6 +782,13 @@ impl EcOps for EcMultiply {
         Ok(prime256v1_point_out(&point))
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, points) = secp384r1_points(data, 1)?;
+        let (_, scalars) = secp384r1_scalars(data, 1)?;
+        let point = points[0] * scalars[0];
+        Ok(secp384r1_point_out(&point))
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (data, points) = curve25519_points(data, 1)?;
         let (_, scalars) = curve25519_scalars(data, 1)?;
@@ -727,6 +831,12 @@ impl EcOps for EcAdd {
         Ok(prime256v1_point_out(&point))
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = secp384r1_points(data, 2)?;
+        let point = points[0] + points[1];
+        Ok(secp384r1_point_out(&point))
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, points) = curve25519_points(data, 2)?;
         let point = points[0] + points[1];
@@ -765,6 +875,12 @@ impl EcOps for EcNeg {
         Ok(prime256v1_point_out(&point))
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = secp384r1_points(data, 1)?;
+        let point = -points[0];
+        Ok(secp384r1_point_out(&point))
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, points) = curve25519_points(data, 1)?;
         let point = -points[0];
@@ -799,6 +915,12 @@ impl EcOps for EcEqual {
 
     fn prime256v1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, points) = prime256v1_points(data, 2)?;
+        let res = points[0] == points[1];
+        Ok(vec![res.into()])
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = secp384r1_points(data, 2)?;
         let res = points[0] == points[1];
         Ok(vec![res.into()])
     }
@@ -841,6 +963,12 @@ impl EcOps for EcIsInfinity {
         Ok(vec![res])
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = secp384r1_points(data, 1)?;
+        let res = points[0].is_identity().unwrap_u8();
+        Ok(vec![res])
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, points) = curve25519_points(data, 1)?;
         let res = curve25519_dalek::traits::IsIdentity::is_identity(&points[0]);
@@ -874,6 +1002,11 @@ impl EcOps for EcIsValid {
 
     fn prime256v1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let res = prime256v1_points(data, 1).is_ok();
+        Ok(vec![res.into()])
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let res = secp384r1_points(data, 1).is_ok();
         Ok(vec![res.into()])
     }
 
@@ -917,6 +1050,15 @@ impl EcOps for EcHash {
         >(&[&data[..lengths[0]]], &[b"P256_XMD:SHA-256_SSWU_RO_"])
         .map_err(|_| Error::EcOpsInvalidPoint)?;
         Ok(prime256v1_point_out(&point))
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let point = p384::NistP384::hash_from_bytes::<
+            elliptic_curve::hash2curve::ExpandMsgXmd<sha2::Sha384>,
+        >(&[&data[..lengths[0]]], &[b"P384_XMD:SHA-384_SSWU_RO_"])
+        .map_err(|_| Error::EcOpsInvalidPoint)?;
+        Ok(secp384r1_point_out(&point))
     }
 
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -978,6 +1120,16 @@ impl EcOps for EcSumOfProducts {
         >(&points, &scalars)))
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let cnt = lengths[0];
+        let (data, points) = secp384r1_points(data, cnt)?;
+        let (_, scalars) = secp384r1_scalars(data, cnt)?;
+        Ok(secp384r1_point_out(&sum_of_products_pippenger::<
+            p384::NistP384,
+        >(&points, &scalars)))
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         use curve25519_dalek::traits::MultiscalarMul;
 
@@ -1026,6 +1178,10 @@ impl EcOps for EcPairing {
     }
 
     fn prime256v1(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsInvalidCurve)
+    }
+
+    fn secp384r1(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
         Err(Error::EcOpsInvalidCurve)
     }
 
@@ -1089,6 +1245,12 @@ impl EcOps for ScalarAdd {
         Ok(scalar.to_bytes().to_vec())
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 2)?;
+        let scalar = scalars[0] + scalars[1];
+        Ok(scalar.to_bytes().to_vec())
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = curve25519_scalars(data, 2)?;
         let scalar = scalars[0] + scalars[1];
@@ -1127,6 +1289,12 @@ impl EcOps for ScalarMul {
         Ok(scalar.to_bytes().to_vec())
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 2)?;
+        let scalar = scalars[0] * scalars[1];
+        Ok(scalar.to_bytes().to_vec())
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = curve25519_scalars(data, 2)?;
         let scalar = scalars[0] * scalars[1];
@@ -1161,6 +1329,12 @@ impl EcOps for ScalarNeg {
 
     fn prime256v1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = prime256v1_scalars(data, 1)?;
+        let scalar = -scalars[0];
+        Ok(scalar.to_bytes().to_vec())
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 1)?;
         let scalar = -scalars[0];
         Ok(scalar.to_bytes().to_vec())
     }
@@ -1205,6 +1379,13 @@ impl EcOps for ScalarInv {
         Ok(scalar.to_bytes().to_vec())
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 1)?;
+        let scalar =
+            Option::<p384::Scalar>::from(scalars[0].invert()).ok_or(Error::EcOpsInvalidScalar)?;
+        Ok(scalar.to_bytes().to_vec())
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = curve25519_scalars(data, 1)?;
         let scalar = scalars[0].invert();
@@ -1246,6 +1427,16 @@ impl EcOps for ScalarSqrt {
 
     fn prime256v1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = prime256v1_scalars(data, 1)?;
+        let (is_sqr, res) = scalars[0].sqrt_alt();
+        if is_sqr.into() {
+            Ok(res.to_bytes().to_vec())
+        } else {
+            Err(Error::EcOpsInvalidScalar)
+        }
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 1)?;
         let (is_sqr, res) = scalars[0].sqrt_alt();
         if is_sqr.into() {
             Ok(res.to_bytes().to_vec())
@@ -1308,6 +1499,12 @@ impl EcOps for ScalarEqual {
         Ok(vec![res.into()])
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 2)?;
+        let res = scalars[0] == scalars[1];
+        Ok(vec![res.into()])
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = curve25519_scalars(data, 2)?;
         let res = scalars[0] == scalars[1];
@@ -1346,6 +1543,12 @@ impl EcOps for ScalarIsZero {
         Ok(vec![res])
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = secp384r1_scalars(data, 1)?;
+        let res = scalars[0].is_zero().unwrap_u8();
+        Ok(vec![res])
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = curve25519_scalars(data, 1)?;
         let res = scalars[0].is_zero().unwrap_u8();
@@ -1379,6 +1582,11 @@ impl EcOps for ScalarIsValid {
 
     fn prime256v1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let res = prime256v1_scalars(data, 1).is_ok();
+        Ok(vec![res.into()])
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let res = secp384r1_scalars(data, 1).is_ok();
         Ok(vec![res.into()])
     }
 
@@ -1423,6 +1631,21 @@ impl EcOps for ScalarFromWideBytes {
         let mut s0 = <p256::Scalar as elliptic_curve::ops::Reduce<elliptic_curve::bigint::U256>>::reduce_bytes(hi);
         let s1 = <p256::Scalar as elliptic_curve::ops::Reduce<elliptic_curve::bigint::U256>>::reduce_bytes(lo);
         for _ in 1..=256 {
+            s0 = s0.double();
+        }
+        Ok((s0 + s1).to_bytes().to_vec())
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        if data.len() != 96 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let hi = p384::FieldBytes::from_slice(&data[..48]);
+        let lo = p384::FieldBytes::from_slice(&data[48..]);
+
+        let mut s0 = <p384::Scalar as elliptic_curve::ops::Reduce<elliptic_curve::bigint::U384>>::reduce_bytes(hi);
+        let s1 = <p384::Scalar as elliptic_curve::ops::Reduce<elliptic_curve::bigint::U384>>::reduce_bytes(lo);
+        for _ in 1..=384 {
             s0 = s0.double();
         }
         Ok((s0 + s1).to_bytes().to_vec())
@@ -1483,6 +1706,16 @@ impl EcOps for ScalarHash {
         let scalar = p256::NistP256::hash_to_scalar::<
             elliptic_curve::hash2curve::ExpandMsgXmd<sha2::Sha256>,
         >(&[&data[..cnt]], &[b"P256_XMD:SHA-256_RO_"])
+        .unwrap();
+        Ok(scalar.to_bytes().to_vec())
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let cnt = lengths[0];
+        let scalar = p384::NistP384::hash_to_scalar::<
+            elliptic_curve::hash2curve::ExpandMsgXmd<sha2::Sha384>,
+        >(&[&data[..cnt]], &[b"P384_XMD:SHA-384_RO_"])
         .unwrap();
         Ok(scalar.to_bytes().to_vec())
     }
@@ -1558,6 +1791,28 @@ impl EcOps for EcdsaVerify {
             return Err(Error::EcOpsInvalidSize);
         }
         let signature = p256::ecdsa::Signature::from_slice(&data[..64])
+            .map_err(|_| Error::EcOpsInvalidSignature)?;
+
+        if verify_ecdsa(&points[0], &scalars[0], &signature).is_ok() {
+            Ok(vec![1u8])
+        } else {
+            Ok(vec![0u8])
+        }
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, scalars) = secp384r1_scalars(data, 1)?;
+        if scalars[0].is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+        let (data, points) = secp384r1_points(data, 1)?;
+        if points[0].is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        if data.len() < 96 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let signature = p384::ecdsa::Signature::from_slice(&data[..96])
             .map_err(|_| Error::EcOpsInvalidSignature)?;
 
         if verify_ecdsa(&points[0], &scalars[0], &signature).is_ok() {
@@ -1653,6 +1908,44 @@ impl EcOps for SchnorrVerify1 {
         let e = <p256::Scalar as Reduce<p256::U256>>::reduce_bytes((&e_bytes[..]).into());
 
         let big_r = (p256::ProjectivePoint::GENERATOR * s.as_ref() - points[0] * e).to_affine();
+
+        if big_r.is_identity().into() || &big_r.x() != r_bytes {
+            Ok(vec![0u8])
+        } else {
+            Ok(vec![1u8])
+        }
+    }
+
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, hasher) = parse_hash(data)?;
+        if data.len() < 48 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let msg = &data[..48];
+        let (data, points) = secp384r1_points(&data[48..], 1)?;
+        if points[0].is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        if data.len() < 96 {
+            return Err(Error::EcOpsInvalidSignature);
+        }
+
+        let r_bytes = (&data[..48]).into();
+        let r = Option::<p384::FieldElement>::from(p384::FieldElement::from_bytes(r_bytes))
+            .ok_or(Error::EcOpsInvalidScalar)?;
+        if r.is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+        let s =
+            p384::NonZeroScalar::try_from(&data[48..]).map_err(|_| Error::EcOpsInvalidScalar)?;
+        if s.is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+
+        let e_bytes = hasher.compute_challenge(r_bytes, &points[0].to_bytes()[1..], msg);
+        let e = <p384::Scalar as Reduce<p384::U384>>::reduce_bytes((&e_bytes[..]).into());
+
+        let big_r = (p384::ProjectivePoint::GENERATOR * s.as_ref() - points[0] * e).to_affine();
 
         if big_r.is_identity().into() || &big_r.x() != r_bytes {
             Ok(vec![0u8])
@@ -1880,6 +2173,48 @@ impl EcOps for SchnorrVerify2 {
         }
     }
 
+    fn secp384r1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, hasher) = parse_hash(data)?;
+        let (data, scalars) = secp384r1_scalars(data, 1)?;
+        if scalars[0].is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+        let (data, points) = secp384r1_points(data, 1)?;
+        if points[0].is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        if data.len() < 80 {
+            return Err(Error::EcOpsInvalidSignature);
+        }
+
+        let r_bytes = (&data[..48]).into();
+        let r = Option::<p384::FieldElement>::from(p384::FieldElement::from_bytes(r_bytes))
+            .ok_or(Error::EcOpsInvalidScalar)?;
+        if r.is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+        let s =
+            p384::NonZeroScalar::try_from(&data[48..]).map_err(|_| Error::EcOpsInvalidScalar)?;
+        if s.is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+
+        let e_bytes = hasher.compute_challenge(
+            r_bytes,
+            &points[0].to_bytes()[..],
+            &scalars[0].to_bytes()[..],
+        );
+        let e = <p384::Scalar as Reduce<p384::U384>>::reduce_bytes((&e_bytes[..]).into());
+
+        let big_r = (p384::ProjectivePoint::GENERATOR * s.as_ref() + points[0] * e).to_affine();
+
+        if big_r.is_identity().into() || &big_r.x() != r_bytes {
+            Ok(vec![0u8])
+        } else {
+            Ok(vec![1u8])
+        }
+    }
+
     fn curve25519(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (data, hasher) = parse_hash(data)?;
         let (data, scalars) = curve25519_scalars(data, 1)?;
@@ -2033,6 +2368,10 @@ impl EcOps for BlsVerify {
     }
 
     fn prime256v1(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsNotSupported)
+    }
+
+    fn secp384r1(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
         Err(Error::EcOpsNotSupported)
     }
 
@@ -2211,11 +2550,11 @@ fn sum_of_products_pippenger<C: CurveArithmetic>(
 }
 
 #[cfg(target_pointer_width = "32")]
-fn convert_scalars<C: CurveArithmetic>(scalars: &[C::Scalar]) -> Vec<[u64; 4]> {
+fn convert_scalars<C: CurveArithmetic>(scalars: &[C::Scalar]) -> Vec<Vec<u64>> {
     scalars
         .iter()
         .map(|s| {
-            let mut out = [0u64; 4];
+            let mut out = Vec::with_capacity(4);
             let primitive: ScalarPrimitive<C> = (*s).into();
             let small_limbs = primitive
                 .as_limbs()
@@ -2223,11 +2562,9 @@ fn convert_scalars<C: CurveArithmetic>(scalars: &[C::Scalar]) -> Vec<[u64; 4]> {
                 .map(|l| l.0 as u64)
                 .collect::<Vec<_>>();
             let mut i = 0;
-            let mut j = 0;
             while i < small_limbs.len() && j < out.len() {
-                out[j] = small_limbs[i + 1] << 32 | small_limbs[i];
+                out.push(small_limbs[i + 1] << 32 | small_limbs[i]);
                 i += 2;
-                j += 1;
             }
             out
         })
@@ -2235,20 +2572,13 @@ fn convert_scalars<C: CurveArithmetic>(scalars: &[C::Scalar]) -> Vec<[u64; 4]> {
 }
 
 #[cfg(target_pointer_width = "64")]
-fn convert_scalars<C: CurveArithmetic>(scalars: &[C::Scalar]) -> Vec<[u64; 4]> {
+fn convert_scalars<C: CurveArithmetic>(scalars: &[C::Scalar]) -> Vec<Vec<u64>> {
     scalars
         .iter()
         .map(|s| {
-            let mut out = [0u64; 4];
+            let mut out = Vec::with_capacity(4);
             let primitive: ScalarPrimitive<C> = (*s).into();
-            out.copy_from_slice(
-                primitive
-                    .as_limbs()
-                    .iter()
-                    .map(|l| l.0 as u64)
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            );
+            out.append(&mut primitive.as_limbs().iter().map(|l| l.0).collect::<Vec<_>>());
             out
         })
         .collect::<Vec<_>>()
@@ -2318,6 +2648,42 @@ mod test {
         input.extend_from_slice(&prime256v1_point_out(&points[1]));
         input.extend_from_slice(&prime256v1_point_out(&points[2]));
         input.extend_from_slice(&prime256v1_point_out(&points[3]));
+        input.extend_from_slice(&&scalars[0].to_bytes()[..]);
+        input.extend_from_slice(&&scalars[1].to_bytes()[..]);
+        input.extend_from_slice(&&scalars[2].to_bytes()[..]);
+        input.extend_from_slice(&&scalars[3].to_bytes()[..]);
+        let res = ec_operation(&input, 100);
+        assert!(res.is_ok());
+        let (_, bytes) = res.unwrap();
+        assert_eq!(
+            expected.to_encoded_point(false).as_bytes()[1..].to_vec(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn ecc_sum_of_products_secp384r1() {
+        let points = vec![
+            p384::ProjectivePoint::GENERATOR,
+            p384::ProjectivePoint::GENERATOR,
+            p384::ProjectivePoint::GENERATOR,
+            p384::ProjectivePoint::GENERATOR,
+        ];
+        let scalars = vec![
+            p384::Scalar::from(1u64),
+            p384::Scalar::from(2u64),
+            p384::Scalar::from(3u64),
+            p384::Scalar::from(4u64),
+        ];
+        let expected = p384::ProjectivePoint::GENERATOR * p384::Scalar::from(10u64);
+        let mut input = CURVE_NAME_SECP384R1.to_vec();
+        input.insert(0, EcOperation::EcSumOfProducts as u8);
+        input.extend_from_slice(&[0u8; 31]);
+        input.push(4);
+        input.extend_from_slice(&secp384r1_point_out(&points[0]));
+        input.extend_from_slice(&secp384r1_point_out(&points[1]));
+        input.extend_from_slice(&secp384r1_point_out(&points[2]));
+        input.extend_from_slice(&secp384r1_point_out(&points[3]));
         input.extend_from_slice(&&scalars[0].to_bytes()[..]);
         input.extend_from_slice(&&scalars[1].to_bytes()[..]);
         input.extend_from_slice(&&scalars[2].to_bytes()[..]);
@@ -2565,6 +2931,22 @@ mod test {
     }
 
     #[test]
+    fn scalar_mul_secp384r1() {
+        let sc1 = p384::Scalar::from(100u64);
+        let sc2 = p384::Scalar::from(200u64);
+
+        let mut input = CURVE_NAME_SECP384R1.to_vec();
+        input.insert(0, EcOperation::ScMul as u8);
+        input.extend_from_slice(&sc1.to_bytes());
+        input.extend_from_slice(&sc2.to_bytes());
+        let expected = sc1 * sc2;
+        let res = ec_operation(&input, 100);
+        assert!(res.is_ok());
+        let (_, bytes) = res.unwrap();
+        assert_eq!(expected.to_bytes().to_vec(), bytes);
+    }
+
+    #[test]
     fn scalar_mul_curve25519() {
         let sc1 = curve25519_dalek::Scalar::from(100u64);
         let sc2 = curve25519_dalek::Scalar::from(200u64);
@@ -2638,6 +3020,29 @@ mod test {
         let hashed_message = <p256::Scalar as Reduce<k256::U256>>::reduce_bytes(&hashed_msg_bytes);
 
         let mut input = CURVE_NAME_PRIME256V1.to_vec();
+        input.insert(0, EcOperation::EcdsaVerify as u8);
+        input.extend_from_slice(&hashed_message.to_bytes());
+        input.extend_from_slice(&verify_key.to_encoded_point(false).as_bytes()[1..]);
+        input.extend_from_slice(&signature.to_bytes());
+        let res = ec_operation(&input, 100);
+        assert!(res.is_ok());
+        let (_, bytes) = res.unwrap();
+        assert_eq!(bytes, vec![1u8]);
+    }
+
+    #[test]
+    fn ecdsa_verify_secp384r1() {
+        use p384::ecdsa::{signature::Signer, Signature, SigningKey, VerifyingKey};
+        use sha2::Digest;
+
+        let sign_key = SigningKey::random(&mut rand::rngs::OsRng);
+        let verify_key = VerifyingKey::from(&sign_key);
+        let signature: Signature = sign_key.sign(HASH_MSG);
+
+        let hashed_msg_bytes = sha2::Sha384::digest(HASH_MSG);
+        let hashed_message = <p384::Scalar as Reduce<p384::U384>>::reduce_bytes(&hashed_msg_bytes);
+
+        let mut input = CURVE_NAME_SECP384R1.to_vec();
         input.insert(0, EcOperation::EcdsaVerify as u8);
         input.extend_from_slice(&hashed_message.to_bytes());
         input.extend_from_slice(&verify_key.to_encoded_point(false).as_bytes()[1..]);
@@ -2753,6 +3158,40 @@ mod test {
         let mut input = CURVE_NAME_PRIME256V1.to_vec();
         input.insert(0, EcOperation::SchnorrVerify1 as u8);
         input.extend_from_slice(&HASH_NAME_SHA2_256);
+        input.extend_from_slice(&hashed_msg_bytes);
+        input.extend_from_slice(&verify_key.to_encoded_point(false).as_bytes()[1..]);
+        input.extend_from_slice(&big_r.to_affine().x());
+        input.extend_from_slice(&s.to_bytes());
+        let res = ec_operation(&input, 100);
+        assert!(res.is_ok());
+        let (_, bytes) = res.unwrap();
+        assert_eq!(bytes, vec![1u8]);
+    }
+
+    #[test]
+    fn schnorr_verify_secp384r1() {
+        use elliptic_curve::Field;
+        use p384::{ProjectivePoint, Scalar};
+        use sha2::Digest;
+
+        let sign_key = Scalar::random(&mut rand::rngs::OsRng);
+        let verify_key = ProjectivePoint::GENERATOR * sign_key;
+
+        let hashed_msg_bytes = sha2::Sha384::digest(HASH_MSG);
+
+        let little_r = Scalar::random(&mut rand::rngs::OsRng);
+        let big_r = ProjectivePoint::GENERATOR * little_r;
+        let mut sha384 = sha2::Sha384::new();
+        sha384.update(big_r.to_affine().x());
+        sha384.update(&verify_key.to_bytes()[1..]);
+        sha384.update(&hashed_msg_bytes);
+        let e_bytes = sha384.finalize();
+        let e = <Scalar as Reduce<p384::U384>>::reduce_bytes(&e_bytes);
+        let s = little_r + e * sign_key;
+
+        let mut input = CURVE_NAME_SECP384R1.to_vec();
+        input.insert(0, EcOperation::SchnorrVerify1 as u8);
+        input.extend_from_slice(&HASH_NAME_SHA2_384);
         input.extend_from_slice(&hashed_msg_bytes);
         input.extend_from_slice(&verify_key.to_encoded_point(false).as_bytes()[1..]);
         input.extend_from_slice(&big_r.to_affine().x());
@@ -2940,4 +3379,37 @@ mod test {
         );
         assert_eq!(&expected.to_bytes()[..], &bytes[..]);
     }
+}
+
+#[test]
+fn integration_test1() {
+    use sha2::Digest;
+
+    const TEST_INPUT: &[u8] = &[
+        1u8, 0, 0, 0, 0, 101, 92, 43, 178, 0, 157, 137, 108, 202, 42, 239, 133, 106, 124, 17, 78,
+        140, 254, 165, 166, 3, 68, 236, 72, 237, 26, 60, 125, 231, 225, 12, 198, 231, 69, 129, 98,
+        109, 10, 125, 19, 128, 146, 177, 152, 192, 20, 234, 151, 23, 232, 132, 192, 3, 16, 94, 72,
+        223, 175, 141, 9, 136, 150, 119, 236, 165, 211, 136, 243, 6, 175, 213, 176, 39, 182, 105,
+        20, 182, 3, 76, 186, 159, 25, 55, 132, 193, 4, 131, 33, 255, 109, 25, 248, 87, 34, 197,
+        244, 124, 144, 117, 142, 200, 243, 140, 168, 103, 244, 154, 71, 158, 211, 131, 180, 42,
+        189, 242, 137, 170, 2, 61, 106, 241, 24, 60, 97, 169, 160, 126, 36, 139, 117, 207, 195, 70,
+        18, 148, 72, 60, 5, 98, 15, 242, 4, 228, 55, 81, 61, 187, 184, 79, 250, 202, 214, 148, 29,
+        54, 183, 128, 31, 56, 98, 216, 97, 144, 112, 206, 7, 62, 245, 2, 197, 51, 240, 12, 2, 139,
+        72, 208, 82, 192, 50, 72, 237, 47, 90, 92, 197, 233, 31, 36, 161, 76, 144, 79, 52, 57, 215,
+        43, 204, 175, 236, 205, 109, 130, 15, 40, 158, 218, 244, 129, 136, 4, 126, 85, 15, 34, 7,
+        188, 110, 29, 83, 56, 69, 229, 9, 136, 65, 119, 65, 76, 68, 21, 191, 241, 236, 148, 123, 0,
+        117, 226, 132, 199, 220, 249, 105, 68, 218, 45, 248, 229, 104, 106, 172, 219, 254, 141,
+        225, 65, 209, 175, 70, 179,
+    ];
+    let mut input = vec![EcOperation::SchnorrVerify1 as u8];
+    input.extend_from_slice(CURVE_NAME_BLS12381G1);
+    input.extend_from_slice(HASH_NAME_SHA2_256);
+    input.extend_from_slice(&sha2::Sha256::digest(&TEST_INPUT[..42]));
+    input.extend_from_slice(&TEST_INPUT[170..]);
+    input.extend_from_slice(&TEST_INPUT[42..170]);
+    println!("{}", hex::encode(&input));
+    let res = ec_operation(&input, 100);
+    assert!(res.is_ok());
+    let (_, bytes) = res.unwrap();
+    assert_eq!(bytes, vec![1u8]);
 }
