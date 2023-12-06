@@ -19,7 +19,7 @@ use super::{calc_linear_cost_u32, extract_points, IDENTITY_BASE, IDENTITY_PER_WO
 use crate::{Error, Precompile, PrecompileAddress, PrecompileResult, StandardPrecompileFn, Vec};
 
 pub const EC_OPERATION: PrecompileAddress = PrecompileAddress(
-    crate::u64_to_b160(300),
+    crate::u64_to_b160(301),
     Precompile::Standard(ec_operation as StandardPrecompileFn),
 );
 
