@@ -756,9 +756,9 @@ pub fn is_precompile(address: B160, num_of_precompiles: usize) -> bool {
     let cait_sith_precompile_address =
         B160([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 245]);
 
-    // hardcode 0x000000000000000000000000000000000000012c for lit EC_OPERATION
+    // hardcode 0x000000000000000000000000000000000000012d for lit EC_OPERATION
     let ec_operation_precompile_address =
-        B160([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 44]);
+        B160([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 45]);
     if address == cait_sith_precompile_address || address == ec_operation_precompile_address {
         return true;
     }
