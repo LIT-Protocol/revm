@@ -1,5 +1,4 @@
 use blsful::Pairing;
-use curve25519_dalek::EdwardsPoint;
 use elliptic_curve::{
     group::{prime::PrimeCurveAffine, Curve, GroupEncoding},
     hash2curve::GroupDigest,
@@ -217,6 +216,14 @@ const CURVE_NAME_BLS12381GT: &[u8] = &[
     72, 104, 114, 249, 247, 74, 129, 138, 239, 93, 192, 105, 87, 88, 22, 147, 201, 72, 247, 204,
     168, 110, 248, 13, 211, 195, 253, 59, 152, 53, 40, 135,
 ];
+const CURVE_NAME_JUBJUB: &[u8] = &[
+    134, 207, 207, 62, 155, 118, 130, 42, 187, 158, 186, 128, 70, 96, 138, 78, 235, 13, 173, 62,
+    30, 220, 174, 128, 204, 21, 33, 35, 77, 117, 80, 189,
+];
+const CURVE_NAME_CURVE448: &[u8] = &[
+    168, 208, 60, 254, 40, 51, 250, 69, 203, 225, 43, 80, 125, 84, 58, 230, 136, 19, 36, 161, 32,
+    237, 220, 15, 48, 109, 160, 28, 115, 223, 202, 157,
+];
 const HASH_NAME_SHA2_256: &[u8] = &[
     231, 8, 169, 121, 9, 175, 229, 141, 81, 199, 223, 139, 162, 228, 170, 161, 233, 154, 116, 235,
     240, 211, 10, 216, 160, 162, 14, 213, 193, 29, 101, 84,
@@ -256,6 +263,10 @@ const HASH_NAME_KECCAK256: &[u8] = &[
 const HASH_NAME_TAPROOT: &[u8] = &[
     8, 215, 83, 31, 179, 38, 223, 4, 226, 165, 107, 122, 113, 187, 97, 125, 54, 221, 210, 133, 184,
     114, 109, 3, 149, 156, 81, 26, 98, 162, 91, 241,
+];
+const HASH_NAME_BLAKE2B_512: &[u8] = &[
+    199, 113, 236, 116, 45, 210, 39, 24, 141, 41, 249, 12, 120, 254, 23, 104, 210, 191, 95, 107,
+    10, 139, 24, 34, 55, 109, 234, 231, 162, 80, 65, 254,
 ];
 
 trait EcOps {
@@ -299,6 +310,14 @@ trait EcOps {
                     let result = self.bls12381g1(&data[i + 32..])?;
                     return Ok((gas_used, result));
                 }
+                CURVE_NAME_CURVE448 => {
+                    let result = self.curve448(&data[i + 32..])?;
+                    return Ok((gas_used, result));
+                }
+                CURVE_NAME_JUBJUB => {
+                    let result = self.jubjub(&data[i + 32..])?;
+                    return Ok((gas_used, result));
+                }
                 _ => {}
             };
             i += 1;
@@ -312,6 +331,8 @@ trait EcOps {
     fn bls12381g1(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
     fn bls12381g2(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
 }
 
 fn parse_hash(data: &[u8]) -> Result<(&[u8], Box<dyn SchnorrChallenge>), Error> {
@@ -373,6 +394,12 @@ fn parse_hash(data: &[u8]) -> Result<(&[u8], Box<dyn SchnorrChallenge>), Error> 
                 _marker: PhantomData,
             }),
         )),
+        HASH_NAME_BLAKE2B_512 => Ok((
+            &data[32..],
+            Box::new(SchnorrFixedDigest::<blake2::Blake2b512> {
+                _marker: PhantomData,
+            }),
+        )),
         _ => Err(Error::EcOpsInvalidHash),
     }
 }
@@ -431,7 +458,7 @@ impl SchnorrChallenge for SchnorrHashTaproot {
     }
 }
 
-fn secp256k1_points(
+pub(crate) fn secp256k1_points(
     data: &[u8],
     point_cnt: usize,
 ) -> Result<(&[u8], Vec<k256::ProjectivePoint>), Error> {
@@ -462,7 +489,7 @@ fn secp256k1_scalars(data: &[u8], scalar_cnt: usize) -> Result<(&[u8], Vec<k256:
     Ok((&data[32 * scalar_cnt..], scalars))
 }
 
-fn prime256v1_points(
+pub(crate) fn prime256v1_points(
     data: &[u8],
     point_cnt: usize,
 ) -> Result<(&[u8], Vec<p256::ProjectivePoint>), Error> {
@@ -493,7 +520,7 @@ fn prime256v1_scalars(data: &[u8], scalar_cnt: usize) -> Result<(&[u8], Vec<p256
     Ok((&data[32 * scalar_cnt..], scalars))
 }
 
-fn secp384r1_points(
+pub(crate) fn secp384r1_points(
     data: &[u8],
     point_cnt: usize,
 ) -> Result<(&[u8], Vec<p384::ProjectivePoint>), Error> {
@@ -584,13 +611,38 @@ fn secp384r1_scalars(data: &[u8], scalar_cnt: usize) -> Result<(&[u8], Vec<p384:
     Ok((&data[48 * scalar_cnt..], scalars))
 }
 
-fn curve25519_points(data: &[u8], point_cnt: usize) -> Result<(&[u8], Vec<EdwardsPoint>), Error> {
+pub(crate) fn curve25519_points(
+    data: &[u8],
+    point_cnt: usize,
+) -> Result<(&[u8], Vec<curve25519_dalek::EdwardsPoint>), Error> {
     if 64 * point_cnt > data.len() {
         return Err(Error::EcOpsInvalidPoint);
     }
     let mut points = Vec::with_capacity(point_cnt);
     for i in 0..point_cnt {
         let compressed_point = curve25519_dalek::edwards::CompressedEdwardsY::from_slice(
+            &data[(64 * i) + 32..64 * (i + 1)],
+        )
+        .map_err(|_| Error::EcOpsInvalidPoint)?;
+        let point = compressed_point
+            .decompress()
+            .ok_or(Error::EcOpsInvalidPoint)?;
+        points.push(point);
+    }
+
+    Ok((&data[64 * point_cnt..], points))
+}
+
+pub(crate) fn ristretto25519_points(
+    data: &[u8],
+    point_cnt: usize,
+) -> Result<(&[u8], Vec<curve25519_dalek::RistrettoPoint>), Error> {
+    if 64 * point_cnt > data.len() {
+        return Err(Error::EcOpsInvalidPoint);
+    }
+    let mut points = Vec::with_capacity(point_cnt);
+    for i in 0..point_cnt {
+        let compressed_point = curve25519_dalek::ristretto::CompressedRistretto::from_slice(
             &data[(64 * i) + 32..64 * (i + 1)],
         )
         .map_err(|_| Error::EcOpsInvalidPoint)?;
@@ -622,7 +674,7 @@ fn curve25519_scalars(
     Ok((&data[32 * scalar_cnt..], scalars))
 }
 
-fn bls12381g1_points(
+pub(crate) fn bls12381g1_points(
     data: &[u8],
     point_cnt: usize,
 ) -> Result<(&[u8], Vec<blsful::inner_types::G1Projective>), Error> {
@@ -648,7 +700,7 @@ fn bls12381g1_points(
     ))
 }
 
-fn bls12381g2_points(
+pub(crate) fn bls12381g2_points(
     data: &[u8],
     point_cnt: usize,
 ) -> Result<(&[u8], Vec<blsful::inner_types::G2Projective>), Error> {
@@ -685,8 +737,13 @@ fn bls12381gt_scalar(
     }
     let mut scalars = Vec::with_capacity(cnt);
     for i in 0..cnt {
-        let bytes = <[u8; Gt::BYTES]>::try_from(&data[Gt::BYTES * i..Gt::BYTES * (i + 1)]).unwrap();
-        let scalar = Option::<Gt>::from(Gt::from_bytes(&bytes)).ok_or(Error::EcOpsInvalidScalar)?;
+        let mut repr = <blsful::inner_types::Gt as GroupEncoding>::Repr::default();
+        repr.as_mut().copy_from_slice(
+            &data[blsful::inner_types::Gt::BYTES * i..blsful::inner_types::Gt::BYTES * (i + 1)],
+        );
+        let scalar =
+            Option::<blsful::inner_types::Gt>::from(blsful::inner_types::Gt::from_bytes(&repr))
+                .ok_or(Error::EcOpsInvalidScalar)?;
         scalars.push(scalar);
     }
 
@@ -712,6 +769,81 @@ fn bls12381_scalars(
     Ok((&data[32 * scalar_cnt..], scalars))
 }
 
+pub(crate) fn curve448_points(
+    data: &[u8],
+    points_cnt: usize,
+) -> Result<(&[u8], Vec<ed448_goldilocks_plus::EdwardsPoint>), Error> {
+    if 57 * points_cnt > data.len() {
+        return Err(Error::EcOpsInvalidPoint);
+    }
+    let mut points = Vec::with_capacity(points_cnt);
+    for i in 0..points_cnt {
+        let compressed_pt =
+            ed448_goldilocks_plus::CompressedEdwardsY::try_from(&data[57 * i..57 * (i + 1)])
+                .map_err(|_| Error::EcOpsInvalidPoint)?;
+        let point = Option::<ed448_goldilocks_plus::EdwardsPoint>::from(compressed_pt.decompress())
+            .ok_or(Error::EcOpsInvalidPoint)?;
+        points.push(point);
+    }
+
+    Ok((&data[57 * points_cnt..], points))
+}
+
+fn curve448_scalars(
+    data: &[u8],
+    scalar_cnt: usize,
+) -> Result<(&[u8], Vec<ed448_goldilocks_plus::Scalar>), Error> {
+    if 57 * scalar_cnt > data.len() {
+        return Err(Error::EcOpsInvalidScalar);
+    }
+    let mut bytes = ed448_goldilocks_plus::ScalarBytes::default();
+
+    let mut scalars = Vec::with_capacity(scalar_cnt);
+    for i in 0..scalar_cnt {
+        bytes.copy_from_slice(&data[57 * i..57 * (i + 1)]);
+        let scalar = Option::<ed448_goldilocks_plus::Scalar>::from(
+            ed448_goldilocks_plus::Scalar::from_canonical_bytes(&bytes),
+        )
+        .ok_or(Error::EcOpsInvalidScalar)?;
+        scalars.push(scalar);
+    }
+    Ok((&data[57 * scalar_cnt..], scalars))
+}
+
+pub(crate) fn jubjub_points(
+    data: &[u8],
+    point_cnt: usize,
+) -> Result<(&[u8], Vec<jubjub::SubgroupPoint>), Error> {
+    if 32 * point_cnt > data.len() {
+        return Err(Error::EcOpsInvalidPoint);
+    }
+    let mut points = Vec::with_capacity(point_cnt);
+    for i in 0..point_cnt {
+        let bytes = &data[(32 * i)..32 * (i + 1)]
+            .try_into()
+            .map_err(|_| Error::EcOpsInvalidPoint)?;
+        let compressed_point = jubjub::SubgroupPoint::from_bytes(bytes);
+        let point = Option::from(compressed_point).ok_or(Error::EcOpsInvalidPoint)?;
+        points.push(point);
+    }
+
+    Ok((&data[32 * point_cnt..], points))
+}
+
+fn jubjub_scalars(data: &[u8], scalar_cnt: usize) -> Result<(&[u8], Vec<jubjub::Scalar>), Error> {
+    if 32 * scalar_cnt > data.len() {
+        return Err(Error::EcOpsInvalidScalar);
+    }
+    let mut scalars = Vec::with_capacity(scalar_cnt);
+    for i in 0..scalar_cnt {
+        let bytes = <[u8; 32]>::try_from(&data[32 * i..32 * (i + 1)]).unwrap();
+        let scalar = Option::<jubjub::Scalar>::from(jubjub::Scalar::from_bytes(&bytes))
+            .ok_or(Error::EcOpsInvalidScalar)?;
+        scalars.push(scalar);
+    }
+    Ok((&data[32 * scalar_cnt..], scalars))
+}
+
 fn read_usizes(data: &[u8], cnt: usize) -> Result<(&[u8], Vec<usize>), Error> {
     if 32 * cnt > data.len() {
         return Err(Error::EcOpsInvalidSize);
@@ -725,22 +857,36 @@ fn read_usizes(data: &[u8], cnt: usize) -> Result<(&[u8], Vec<usize>), Error> {
     Ok((&data[32 * cnt..], lengths))
 }
 
-fn secp256k1_point_out(point: &k256::ProjectivePoint) -> Vec<u8> {
+pub(crate) fn secp256k1_point_out(point: &k256::ProjectivePoint) -> Vec<u8> {
     point.to_encoded_point(false).as_bytes()[1..].to_vec()
 }
 
-fn prime256v1_point_out(point: &p256::ProjectivePoint) -> Vec<u8> {
+pub(crate) fn prime256v1_point_out(point: &p256::ProjectivePoint) -> Vec<u8> {
     point.to_encoded_point(false).as_bytes()[1..].to_vec()
 }
 
-fn secp384r1_point_out(point: &p384::ProjectivePoint) -> Vec<u8> {
+pub(crate) fn secp384r1_point_out(point: &p384::ProjectivePoint) -> Vec<u8> {
     point.to_affine().to_encoded_point(false).as_bytes()[1..].to_vec()
 }
 
-fn curve25519_point_out(point: &curve25519_dalek::EdwardsPoint) -> Vec<u8> {
+pub(crate) fn curve25519_point_out(point: &curve25519_dalek::EdwardsPoint) -> Vec<u8> {
     let mut out = vec![0u8; 64];
     out[32..].copy_from_slice(point.compress().as_bytes());
     out
+}
+
+pub(crate) fn ristretto25519_point_out(point: &curve25519_dalek::RistrettoPoint) -> Vec<u8> {
+    let mut out = vec![0u8; 64];
+    out[32..].copy_from_slice(point.compress().as_bytes());
+    out
+}
+
+pub(crate) fn curve448_point_out(point: &ed448_goldilocks_plus::EdwardsPoint) -> Vec<u8> {
+    point.compress().to_bytes().to_vec()
+}
+
+pub(crate) fn jubjub_point_out(point: &jubjub::SubgroupPoint) -> Vec<u8> {
+    point.to_bytes().as_ref().to_vec()
 }
 
 struct EcMultiply {}
@@ -814,6 +960,20 @@ impl EcOps for EcMultiply {
         let (data, points) = bls12381gt_scalar(data, 1)?;
         let (_, scalars) = bls12381_scalars(data, 1)?;
         let point = points[0] * scalars[0];
+        Ok(point.to_bytes().as_ref().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, points) = curve448_points(data, 1)?;
+        let (_, scalars) = curve448_scalars(data, 1)?;
+        let point = points[0] * scalars[0];
+        Ok(point.compress().to_bytes().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, points) = jubjub_points(data, 1)?;
+        let (_, scalars) = jubjub_scalars(data, 1)?;
+        let point = points[0] * scalars[0];
         Ok(point.to_bytes().to_vec())
     }
 }
@@ -858,7 +1018,19 @@ impl EcOps for EcAdd {
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381gt_scalar(data, 2)?;
         let scalar = scalars[0] + scalars[1];
-        Ok(scalar.to_bytes().to_vec())
+        Ok(scalar.to_bytes().as_ref().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = curve448_points(data, 2)?;
+        let point = points[0] + points[1];
+        Ok(point.compress().to_bytes().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = jubjub_points(data, 2)?;
+        let point = points[0] + points[1];
+        Ok(point.to_bytes().to_vec())
     }
 }
 
@@ -902,7 +1074,19 @@ impl EcOps for EcNeg {
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381gt_scalar(data, 1)?;
         let scalar = -scalars[0];
-        Ok(scalar.to_bytes().to_vec())
+        Ok(scalar.to_bytes().as_ref().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = curve448_points(data, 1)?;
+        let point = -points[0];
+        Ok(point.compress().to_bytes().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = jubjub_points(data, 1)?;
+        let point = -points[0];
+        Ok(point.to_bytes().to_vec())
     }
 }
 
@@ -946,6 +1130,18 @@ impl EcOps for EcEqual {
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381gt_scalar(data, 2)?;
         let res = scalars[0] == scalars[1];
+        Ok(vec![res.into()])
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = curve448_points(data, 2)?;
+        let res = points[0] == points[1];
+        Ok(vec![res.into()])
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = jubjub_points(data, 2)?;
+        let res = points[0] == points[1];
         Ok(vec![res.into()])
     }
 }
@@ -992,6 +1188,18 @@ impl EcOps for EcIsInfinity {
         let res = scalars[0].is_identity().unwrap_u8();
         Ok(vec![res])
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = curve448_points(data, 1)?;
+        let res = points[0].is_identity().unwrap_u8();
+        Ok(vec![res])
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, points) = jubjub_points(data, 1)?;
+        let res = points[0].is_identity().unwrap_u8();
+        Ok(vec![res])
+    }
 }
 
 impl EcOps for EcIsValid {
@@ -1029,6 +1237,16 @@ impl EcOps for EcIsValid {
 
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, _scalars) = bls12381gt_scalar(data, 1)?;
+        Ok(vec![1])
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, _points) = curve448_points(data, 1)?;
+        Ok(vec![1])
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, _points) = jubjub_points(data, 1)?;
         Ok(vec![1])
     }
 }
@@ -1095,7 +1313,27 @@ impl EcOps for EcHash {
             blsful::inner_types::G2Projective::GENERATOR,
         )])
         .to_bytes()
+        .as_ref()
         .to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let point = ed448_goldilocks_plus::EdwardsPoint::hash::<
+            elliptic_curve::hash2curve::ExpandMsgXof<sha3::Shake256>,
+        >(&data[..lengths[0]], b"edwards448_XOF:SHAKE-256_ELL2_RO_");
+        Ok(point.compress().to_bytes().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let point = jubjub::SubgroupPoint::from(jubjub::ExtendedPoint::hash::<
+            elliptic_curve::hash2curve::ExpandMsgXmd<blake2::Blake2b512>,
+        >(
+            &data[..lengths[0]],
+            b"jubjub_XMD:BLAKE2B-512_SSWU_RO_",
+        ));
+        Ok(point.to_bytes().to_vec())
     }
 }
 
@@ -1137,7 +1375,7 @@ impl EcOps for EcSumOfProducts {
         let cnt = lengths[0];
         let (data, points) = curve25519_points(data, cnt)?;
         let (_, scalars) = curve25519_scalars(data, cnt)?;
-        let point = EdwardsPoint::multiscalar_mul(scalars.iter(), points.iter());
+        let point = curve25519_dalek::EdwardsPoint::multiscalar_mul(scalars.iter(), points.iter());
         Ok(curve25519_point_out(&point))
     }
 
@@ -1164,11 +1402,35 @@ impl EcOps for EcSumOfProducts {
         let cnt = lengths[0];
         let (data, points) = bls12381gt_scalar(data, cnt)?;
         let (_, scalars) = bls12381_scalars(data, cnt)?;
-        let mut result = blsful::inner_types::Gt::IDENTITY;
+        let mut result = blsful::inner_types::Gt::identity();
         for i in 0..cnt {
             result += points[i] * scalars[i];
         }
-        Ok(result.to_bytes().to_vec())
+        Ok(result.to_bytes().as_ref().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let cnt = lengths[0];
+        let (data, points) = curve448_points(data, cnt)?;
+        let (_, scalars) = curve448_scalars(data, cnt)?;
+        let point = points.into_iter().zip(scalars).fold(
+            ed448_goldilocks_plus::EdwardsPoint::IDENTITY,
+            |acc, (p, s)| acc + p * s,
+        );
+        Ok(point.compress().as_bytes().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let cnt = lengths[0];
+        let (data, points) = jubjub_points(data, cnt)?;
+        let (_, scalars) = jubjub_scalars(data, cnt)?;
+        let point = points
+            .into_iter()
+            .zip(scalars)
+            .fold(jubjub::SubgroupPoint::IDENTITY, |acc, (p, s)| acc + p * s);
+        Ok(point.to_bytes().to_vec())
     }
 }
 
@@ -1200,6 +1462,7 @@ impl EcOps for EcPairing {
         }
         Ok(blsful::Bls12381G1Impl::pairing(pairs.as_slice())
             .to_bytes()
+            .as_ref()
             .to_vec())
     }
 
@@ -1214,6 +1477,7 @@ impl EcOps for EcPairing {
         }
         Ok(blsful::Bls12381G1Impl::pairing(pairs.as_slice())
             .to_bytes()
+            .as_ref()
             .to_vec())
     }
 
@@ -1228,7 +1492,16 @@ impl EcOps for EcPairing {
         }
         Ok(blsful::Bls12381G1Impl::pairing(pairs.as_slice())
             .to_bytes()
+            .as_ref()
             .to_vec())
+    }
+
+    fn curve448(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsInvalidCurve)
+    }
+
+    fn jubjub(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsInvalidCurve)
     }
 }
 
@@ -1274,6 +1547,18 @@ impl EcOps for ScalarAdd {
         let scalar = scalars[0] + scalars[1];
         Ok(scalar.to_be_bytes().to_vec())
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 2)?;
+        let scalar = scalars[0] + scalars[1];
+        Ok(scalar.to_bytes_rfc_8032().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 2)?;
+        let scalar = scalars[0] + scalars[1];
+        Ok(scalar.to_bytes().to_vec())
+    }
 }
 
 impl EcOps for ScalarMul {
@@ -1317,6 +1602,18 @@ impl EcOps for ScalarMul {
         let (_, scalars) = bls12381_scalars(data, 2)?;
         let scalar = scalars[0] * scalars[1];
         Ok(scalar.to_be_bytes().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 2)?;
+        let scalar = scalars[0] * scalars[1];
+        Ok(scalar.to_bytes_rfc_8032().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 2)?;
+        let scalar = scalars[0] * scalars[1];
+        Ok(scalar.to_bytes().to_vec())
     }
 }
 
@@ -1362,6 +1659,18 @@ impl EcOps for ScalarNeg {
         let scalar = -scalars[0];
         Ok(scalar.to_be_bytes().to_vec())
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 1)?;
+        let scalar = -scalars[0];
+        Ok(scalar.to_bytes_rfc_8032().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 1)?;
+        let scalar = -scalars[0];
+        Ok(scalar.to_bytes().to_vec())
+    }
 }
 
 impl EcOps for ScalarInv {
@@ -1394,23 +1703,36 @@ impl EcOps for ScalarInv {
 
     fn bls12381g1(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381_scalars(data, 1)?;
-        let scalar = Option::<blsful::inner_types::Scalar>::from(scalars[0].invert())
+        let scalar = Option::<blsful::inner_types::Scalar>::from(Field::invert(&scalars[0]))
             .ok_or(Error::EcOpsInvalidScalar)?;
         Ok(scalar.to_be_bytes().to_vec())
     }
 
     fn bls12381g2(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381_scalars(data, 1)?;
-        let scalar = Option::<blsful::inner_types::Scalar>::from(scalars[0].invert())
+        let scalar = Option::<blsful::inner_types::Scalar>::from(Field::invert(&scalars[0]))
             .ok_or(Error::EcOpsInvalidScalar)?;
         Ok(scalar.to_be_bytes().to_vec())
     }
 
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381_scalars(data, 1)?;
-        let scalar = Option::<blsful::inner_types::Scalar>::from(scalars[0].invert())
+        let scalar = Option::<blsful::inner_types::Scalar>::from(Field::invert(&scalars[0]))
             .ok_or(Error::EcOpsInvalidScalar)?;
         Ok(scalar.to_be_bytes().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 1)?;
+        let scalar = scalars[0].invert();
+        Ok(scalar.to_bytes_rfc_8032().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 1)?;
+        let scalar =
+            Option::<jubjub::Scalar>::from(scalars[0].invert()).ok_or(Error::EcOpsInvalidScalar)?;
+        Ok(scalar.to_bytes().to_vec())
     }
 }
 
@@ -1484,6 +1806,26 @@ impl EcOps for ScalarSqrt {
             Err(Error::EcOpsInvalidScalar)
         }
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 1)?;
+        let (is_sqr, res) = scalars[0].sqrt_alt();
+        if is_sqr.into() {
+            Ok(res.to_bytes_rfc_8032().to_vec())
+        } else {
+            Err(Error::EcOpsInvalidScalar)
+        }
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 1)?;
+        let (is_sqr, res) = scalars[0].sqrt_alt();
+        if is_sqr.into() {
+            Ok(res.to_bytes().to_vec())
+        } else {
+            Err(Error::EcOpsInvalidScalar)
+        }
+    }
 }
 
 impl EcOps for ScalarEqual {
@@ -1525,6 +1867,18 @@ impl EcOps for ScalarEqual {
 
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let (_, scalars) = bls12381_scalars(data, 2)?;
+        let res = scalars[0] == scalars[1];
+        Ok(vec![res.into()])
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 2)?;
+        let res = scalars[0] == scalars[1];
+        Ok(vec![res.into()])
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 2)?;
         let res = scalars[0] == scalars[1];
         Ok(vec![res.into()])
     }
@@ -1572,6 +1926,18 @@ impl EcOps for ScalarIsZero {
         let res = scalars[0].is_zero().unwrap_u8();
         Ok(vec![res])
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = curve448_scalars(data, 1)?;
+        let res = scalars[0].is_zero().unwrap_u8();
+        Ok(vec![res])
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (_, scalars) = jubjub_scalars(data, 1)?;
+        let res = scalars[0].is_zero().unwrap_u8();
+        Ok(vec![res])
+    }
 }
 
 impl EcOps for ScalarIsValid {
@@ -1607,6 +1973,16 @@ impl EcOps for ScalarIsValid {
 
     fn bls12381gt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let res = bls12381_scalars(data, 1).is_ok();
+        Ok(vec![res.into()])
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let res = curve448_scalars(data, 1).is_ok();
+        Ok(vec![res.into()])
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let res = jubjub_scalars(data, 1).is_ok();
         Ok(vec![res.into()])
     }
 }
@@ -1687,6 +2063,23 @@ impl EcOps for ScalarFromWideBytes {
             blsful::inner_types::Scalar::from_bytes_wide(&<[u8; 64]>::try_from(data).unwrap());
         Ok(scalar.to_be_bytes().to_vec())
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        if data.len() != 114 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let bytes = ed448_goldilocks_plus::WideScalarBytes::from_slice(data);
+        let scalar = ed448_goldilocks_plus::Scalar::from_bytes_mod_order_wide(bytes);
+        Ok(scalar.to_bytes_rfc_8032().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        if data.len() != 64 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let scalar = jubjub::Scalar::from_bytes_wide(&<[u8; 64]>::try_from(data).unwrap());
+        Ok(scalar.to_bytes().to_vec())
+    }
 }
 
 impl EcOps for ScalarHash {
@@ -1752,6 +2145,24 @@ impl EcOps for ScalarHash {
             elliptic_curve::hash2curve::ExpandMsgXmd<sha2::Sha256>,
         >(&data[..cnt], b"BLS12381_XMD:SHA-256_RO_");
         Ok(scalar.to_be_bytes().to_vec())
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let cnt = lengths[0];
+        let scalar = ed448_goldilocks_plus::Scalar::hash::<
+            elliptic_curve::hash2curve::ExpandMsgXof<sha3::Shake256>,
+        >(&data[..cnt], b"edwards448_XOF:SHAKE-256_RO_");
+        Ok(scalar.to_bytes_rfc_8032().to_vec())
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, lengths) = read_usizes(data, 1)?;
+        let cnt = lengths[0];
+        let scalar = jubjub::Scalar::hash::<
+            elliptic_curve::hash2curve::ExpandMsgXmd<blake2::Blake2b512>,
+        >(&data[..cnt], b"jubjub_XMD:BLAKE2B-512_RO_");
+        Ok(scalar.to_bytes().to_vec())
     }
 }
 
@@ -1835,6 +2246,14 @@ impl EcOps for EcdsaVerify {
     }
 
     fn bls12381gt(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsNotSupported)
+    }
+
+    fn curve448(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsNotSupported)
+    }
+
+    fn jubjub(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
         Err(Error::EcOpsNotSupported)
     }
 }
@@ -1985,8 +2404,12 @@ impl EcOps for SchnorrVerify1 {
             return Err(Error::EcOpsInvalidPoint);
         }
 
-        let big_r =
-            EdwardsPoint::vartime_double_scalar_mul_basepoint(&e, &-points[0], &s).compress();
+        let big_r = curve25519_dalek::EdwardsPoint::vartime_double_scalar_mul_basepoint(
+            &e,
+            &-points[0],
+            &s,
+        )
+        .compress();
         if big_r == r {
             Ok(vec![1u8])
         } else {
@@ -2080,6 +2503,79 @@ impl EcOps for SchnorrVerify1 {
         let e = blsful::inner_types::Scalar::from_bytes_wide(&e_arr);
 
         let big_r = blsful::inner_types::Gt::generator() * sig_s[0] - pk * e;
+        if big_r == sig_r {
+            Ok(vec![1u8])
+        } else {
+            Ok(vec![0u8])
+        }
+    }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, hasher) = parse_hash(data)?;
+        if data.len() < 57 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let msg = &data[..57];
+        let (data, points) = curve448_points(&data[57..], 1)?;
+        if points[0].is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        if data.len() < 114 {
+            return Err(Error::EcOpsInvalidSignature);
+        }
+        let e_bytes = hasher.compute_challenge(&data[..57], points[0].compress().as_bytes(), msg);
+        let e_arr = ed448_goldilocks_plus::WideScalarBytes::from_slice(&e_bytes);
+        let e = ed448_goldilocks_plus::Scalar::from_bytes_mod_order_wide(e_arr);
+        let s_bytes = ed448_goldilocks_plus::ScalarBytes::from_slice(&data[57..114]);
+        let s = Option::<ed448_goldilocks_plus::Scalar>::from(
+            ed448_goldilocks_plus::Scalar::from_canonical_bytes(s_bytes),
+        )
+        .ok_or(Error::EcOpsInvalidScalar)?;
+        if s.is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+        let r = Option::<ed448_goldilocks_plus::EdwardsPoint>::from(
+            ed448_goldilocks_plus::CompressedEdwardsY::try_from(&data[..57])
+                .map_err(|_| Error::EcOpsInvalidScalar)?
+                .decompress(),
+        )
+        .ok_or(Error::EcOpsInvalidScalar)?;
+        if r.is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+
+        let big_r = (-points[0] * e) + ed448_goldilocks_plus::EdwardsPoint::GENERATOR * s;
+        if big_r == r {
+            Ok(vec![1u8])
+        } else {
+            Ok(vec![0u8])
+        }
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, hasher) = parse_hash(data)?;
+        if data.len() < 32 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let msg = &data[..32];
+        let (data, points) = jubjub_points(&data[32..], 2)?;
+        if (points[0].is_identity() | points[1].is_identity()).into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        let pk = points[0];
+        let sig_r = points[1];
+        let (_, sig_s) = jubjub_scalars(data, 1)?;
+        if sig_s[0].is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+
+        let e_bytes =
+            hasher.compute_challenge(sig_r.to_bytes().as_ref(), pk.to_bytes().as_ref(), msg);
+        let mut e_arr = [0u8; 64];
+        e_arr[64 - e_bytes.len()..].copy_from_slice(&e_bytes[..]);
+        let e = jubjub::Scalar::from_bytes_wide(&e_arr);
+
+        let big_r = jubjub::SubgroupPoint::generator() * sig_s[0] - pk * e;
         if big_r == sig_r {
             Ok(vec![1u8])
         } else {
@@ -2251,7 +2747,8 @@ impl EcOps for SchnorrVerify2 {
         }
 
         let big_r =
-            EdwardsPoint::vartime_double_scalar_mul_basepoint(&e, &points[0], &s).compress();
+            curve25519_dalek::EdwardsPoint::vartime_double_scalar_mul_basepoint(&e, &points[0], &s)
+                .compress();
         if big_r == r {
             Ok(vec![1u8])
         } else {
@@ -2360,6 +2857,79 @@ impl EcOps for SchnorrVerify2 {
             Ok(vec![0u8])
         }
     }
+
+    fn curve448(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, hasher) = parse_hash(data)?;
+        if data.len() < 57 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let msg = &data[..57];
+        let (data, points) = curve448_points(&data[57..], 1)?;
+        if points[0].is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        if data.len() < 114 {
+            return Err(Error::EcOpsInvalidSignature);
+        }
+        let e_bytes = hasher.compute_challenge(&data[..57], points[0].compress().as_bytes(), msg);
+        let e_arr = ed448_goldilocks_plus::WideScalarBytes::from_slice(&e_bytes);
+        let e = ed448_goldilocks_plus::Scalar::from_bytes_mod_order_wide(e_arr);
+        let s_bytes = ed448_goldilocks_plus::ScalarBytes::from_slice(&data[57..114]);
+        let s = Option::<ed448_goldilocks_plus::Scalar>::from(
+            ed448_goldilocks_plus::Scalar::from_canonical_bytes(s_bytes),
+        )
+        .ok_or(Error::EcOpsInvalidScalar)?;
+        if s.is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+        let r = Option::<ed448_goldilocks_plus::EdwardsPoint>::from(
+            ed448_goldilocks_plus::CompressedEdwardsY::try_from(&data[..57])
+                .map_err(|_| Error::EcOpsInvalidScalar)?
+                .decompress(),
+        )
+        .ok_or(Error::EcOpsInvalidScalar)?;
+        if r.is_identity().into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+
+        let big_r = (points[0] * e) + ed448_goldilocks_plus::EdwardsPoint::GENERATOR * s;
+        if big_r == r {
+            Ok(vec![1u8])
+        } else {
+            Ok(vec![0u8])
+        }
+    }
+
+    fn jubjub(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let (data, hasher) = parse_hash(data)?;
+        if data.len() < 32 {
+            return Err(Error::EcOpsInvalidSize);
+        }
+        let msg = &data[..32];
+        let (data, points) = jubjub_points(&data[32..], 2)?;
+        if (points[0].is_identity() | points[1].is_identity()).into() {
+            return Err(Error::EcOpsInvalidPoint);
+        }
+        let pk = points[0];
+        let sig_r = points[1];
+        let (_, sig_s) = jubjub_scalars(data, 1)?;
+        if sig_s[0].is_zero().into() {
+            return Err(Error::EcOpsInvalidScalar);
+        }
+
+        let e_bytes =
+            hasher.compute_challenge(sig_r.to_bytes().as_ref(), pk.to_bytes().as_ref(), msg);
+        let mut e_arr = [0u8; 64];
+        e_arr[64 - e_bytes.len()..].copy_from_slice(&e_bytes[..]);
+        let e = jubjub::Scalar::from_bytes_wide(&e_arr);
+
+        let big_r = jubjub::SubgroupPoint::generator() * sig_s[0] + pk * e;
+        if big_r == sig_r {
+            Ok(vec![1u8])
+        } else {
+            Ok(vec![0u8])
+        }
+    }
 }
 
 impl EcOps for BlsVerify {
@@ -2425,6 +2995,14 @@ impl EcOps for BlsVerify {
     }
 
     fn bls12381gt(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsNotSupported)
+    }
+
+    fn curve448(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
+        Err(Error::EcOpsNotSupported)
+    }
+
+    fn jubjub(&self, _data: &[u8]) -> Result<Vec<u8>, Error> {
         Err(Error::EcOpsNotSupported)
     }
 }
@@ -3377,7 +3955,7 @@ mod test {
             &g1.to_affine(),
             &blsful::inner_types::G2Affine::generator(),
         );
-        assert_eq!(&expected.to_bytes()[..], &bytes[..]);
+        assert_eq!(&expected.to_bytes().as_ref()[..], &bytes[..]);
     }
 }
 

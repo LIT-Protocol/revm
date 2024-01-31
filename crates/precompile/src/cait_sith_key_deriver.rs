@@ -1,12 +1,13 @@
 use super::{calc_linear_cost_u32, extract_points, IDENTITY_BASE, IDENTITY_PER_WORD};
+use crate::ec_ops::*;
 use crate::{Error, Precompile, PrecompileAddress, PrecompileResult, StandardPrecompileFn, Vec};
 use elliptic_curve::{
     group::cofactor::CofactorGroup,
     hash2curve::{FromOkm, GroupDigest},
-    sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
+    sec1::{FromEncodedPoint, ModulusSize},
     Curve, CurveArithmetic,
 };
-use hd_keys_ecdsa::*;
+use hd_keys_curves::*;
 
 pub const DERIVE_CAIT_SITH_PUBKEY: PrecompileAddress = PrecompileAddress(
     crate::u64_to_b160(245),
@@ -16,6 +17,37 @@ pub const DERIVE_CAIT_SITH_PUBKEY: PrecompileAddress = PrecompileAddress(
 /// The minimum length of the input.
 const MIN_LENGTH: usize = 81;
 
+#[repr(u8)]
+pub enum CurveType {
+    P256 = 0,
+    K256 = 1,
+    P384 = 2,
+    Ed25519 = 3,
+    Ed448 = 4,
+    Jubjub = 5,
+    Bls12381G1 = 6,
+    Bls12381G2 = 7,
+    Ristretto25519 = 8,
+}
+
+impl TryFrom<u8> for CurveType {
+    type Error = String;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::P256),
+            1 => Ok(Self::K256),
+            2 => Ok(Self::P384),
+            3 => Ok(Self::Ed25519),
+            4 => Ok(Self::Ed448),
+            5 => Ok(Self::Jubjub),
+            6 => Ok(Self::Bls12381G1),
+            7 => Ok(Self::Bls12381G2),
+            8 => Ok(Self::Ristretto25519),
+            _ => Err("invalid curve".to_string()),
+        }
+    }
+}
+
 fn derive_cait_sith_pubkey(input: &[u8], gas_limit: u64) -> PrecompileResult {
     println!("Lit Precompile: derive_cait_sith_pubkey");
     let gas_used = calc_linear_cost_u32(input.len(), IDENTITY_BASE, IDENTITY_PER_WORD);
@@ -24,46 +56,9 @@ fn derive_cait_sith_pubkey(input: &[u8], gas_limit: u64) -> PrecompileResult {
     }
 
     for i in 0..input.len() {
-        match input[i] {
-            0 => {
-                if let Ok(params) = DeriveParams::<p256::NistP256>::try_from(&input[i + 1..]) {
-                    let deriver =
-                        HdKeyDeriver::<p256::NistP256>::new(&params.id, &params.cxt).unwrap();
-
-                    println!("root_hd_keys: {:?}", params.root_hd_keys);
-                    let public = deriver.compute_public_key(&params.root_hd_keys);
-
-                    return Ok((
-                        gas_used,
-                        public
-                            .to_affine()
-                            .to_encoded_point(false)
-                            .as_bytes()
-                            .to_vec(),
-                    ));
-                }
-            }
-            1 => {
-                if let Ok(params) = DeriveParams::<k256::Secp256k1>::try_from(&input[i + 1..]) {
-                    let deriver =
-                        HdKeyDeriver::<k256::Secp256k1>::new(&params.id, &params.cxt).unwrap();
-
-                    println!("root_hd_keys: {:?}", params.root_hd_keys);
-                    let public = deriver.compute_public_key(&params.root_hd_keys);
-
-                    return Ok((
-                        gas_used,
-                        public
-                            .to_affine()
-                            .to_encoded_point(false)
-                            .as_bytes()
-                            .to_vec(),
-                    ));
-                }
-            }
-            _ => {}
+        if let Ok(params) = DeriveParamCnt::try_from(&input[i..]) {
+            return params.derive_public_key().map(|pk| (gas_used, pk));
         }
-
         if input.len() - i < MIN_LENGTH {
             break;
         }
@@ -71,6 +66,154 @@ fn derive_cait_sith_pubkey(input: &[u8], gas_limit: u64) -> PrecompileResult {
     Err(Error::OutOfGas)
 }
 
+struct DeriveParamCnt<'a> {
+    curve_type: CurveType,
+    id: &'a [u8],
+    cxt: &'a [u8],
+    buffer: &'a [u8],
+    public_key_count: usize,
+}
+
+impl<'a> TryFrom<&'a [u8]> for DeriveParamCnt<'a> {
+    type Error = String;
+
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
+        let err = Err(format!("invalid length for derive params: {}", value.len()));
+        if value.len() < MIN_LENGTH {
+            return err;
+        }
+        let curve_type = CurveType::try_from(value[0])?;
+
+        let mut offset = 1;
+        if offset + 4 > value.len() {
+            return err;
+        }
+        let id_len = u32::from_be_bytes([
+            value[offset],
+            value[offset + 1],
+            value[offset + 2],
+            value[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + id_len > value.len() || id_len == 0 {
+            return err;
+        }
+        let id = &value[offset..offset + id_len];
+        offset += id_len;
+        if offset + 4 > value.len() {
+            return err;
+        }
+        let cxt_len = u32::from_be_bytes([
+            value[offset],
+            value[offset + 1],
+            value[offset + 2],
+            value[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + cxt_len > value.len() || cxt_len == 0 {
+            return err;
+        }
+        let cxt = &value[offset..offset + cxt_len];
+        offset += cxt_len;
+        let pks_cnt = u32::from_be_bytes([
+            value[offset],
+            value[offset + 1],
+            value[offset + 2],
+            value[offset + 3],
+        ]) as usize;
+        if pks_cnt < 2 {
+            return Err(format!("Insufficient public key count: {}", pks_cnt));
+        }
+        offset += 4;
+        Ok(Self {
+            curve_type,
+            id,
+            cxt,
+            buffer: &value[offset..],
+            public_key_count: pks_cnt,
+        })
+    }
+}
+
+impl<'a> DeriveParamCnt<'a> {
+    pub fn derive_public_key(&self) -> Result<Vec<u8>, Error> {
+        match self.curve_type {
+            CurveType::P256 => {
+                self.compute_new_public_key::<p256::ProjectivePoint, p256::Scalar, _, _>(
+                    prime256v1_points,
+                    prime256v1_point_out,
+                )
+            },
+            CurveType::K256 => {
+                self.compute_new_public_key::<k256::ProjectivePoint, k256::Scalar, _, _>(
+                    secp256k1_points,
+                    secp256k1_point_out,
+                )
+            },
+            CurveType::P384 => {
+                self.compute_new_public_key::<p384::ProjectivePoint, p384::Scalar, _, _>(
+                    secp384r1_points,
+                    secp384r1_point_out,
+                )
+            },
+            CurveType::Ed25519 => {
+                self.compute_new_public_key::<curve25519_dalek::EdwardsPoint, curve25519_dalek::Scalar, _, _>(
+                    curve25519_points,
+                    curve25519_point_out
+                )
+            },
+            CurveType::Ed448 => {
+                self.compute_new_public_key::<ed448_goldilocks_plus::EdwardsPoint, ed448_goldilocks_plus::Scalar, _, _>(
+                    curve448_points,
+                    curve448_point_out,
+                )
+            },
+            CurveType::Jubjub => {
+                self.compute_new_public_key::<jubjub::SubgroupPoint, jubjub::Scalar, _, _>(
+                    jubjub_points,
+                    jubjub_point_out,
+                )
+            },
+            CurveType::Bls12381G1 => {
+                self.compute_new_public_key::<blsful::inner_types::G1Projective, blsful::inner_types::Scalar, _, _>(
+                    bls12381g1_points,
+                    |pk| pk.to_uncompressed().to_vec()
+                )
+            },
+            CurveType::Bls12381G2 => {
+                self.compute_new_public_key::<blsful::inner_types::G2Projective, blsful::inner_types::Scalar, _, _>(
+                    bls12381g2_points,
+                    |pk| pk.to_uncompressed().to_vec()
+                )
+            },
+            CurveType::Ristretto25519 => {
+                self.compute_new_public_key::<curve25519_dalek::RistrettoPoint, curve25519_dalek::Scalar, _, _>(
+                    ristretto25519_points,
+                    ristretto25519_point_out
+                )
+            }
+        }
+    }
+
+    fn compute_new_public_key<B, D, F, O>(
+        &self,
+        convert_points: F,
+        out_point: O,
+    ) -> Result<Vec<u8>, Error>
+    where
+        B: HDDerivable<Scalar = D>,
+        D: HDDeriver,
+        F: Fn(&[u8], usize) -> Result<(&[u8], Vec<B>), Error>,
+        O: Fn(&B) -> Vec<u8>,
+    {
+        let (_, public_keys) = convert_points(self.buffer, self.public_key_count)?;
+        let tweak = D::create(self.id, self.cxt);
+        let pk = tweak.hd_derive_public_key(&public_keys);
+        Ok(out_point(&pk))
+    }
+}
+
+#[deprecated(since = "2.0.3", note = "Please use DeriveParamsCnt instead")]
 struct DeriveParams<C>
 where
     C: GroupDigest,
@@ -225,8 +368,9 @@ fn derive_precompile_works() {
 
 #[test]
 fn run_test_k256() {
-    let input = hex::decode("0100000020b6b29bd7863f9d949c1352e0f3cf4b4cc194846e6b5dda28bda465b79e1d83630000002b4c49545f48445f4b45595f49445f4b3235365f584d443a5348412d3235365f535357555f524f5f4e554c5f0000000202706ed9fbf152fcc24fa744f727fb3f1e309344f458f6f1ce5ac395785c40b7580248a534627a648dc2f3a555ae215d887a38d1983b962a32215a4c8ab01817aed0").unwrap();
-    let res = derive_cait_sith_pubkey(&input, 1000000000000000000);
+    let input = hex::decode("0100000020b6b29bd7863f9d949c1352e0f3cf4b4cc194846e6b5dda28bda465b79e1d83630000002b4c49545f48445f4b45595f49445f4b3235365f584d443a5348412d3235365f535357555f524f5f4e554c5f00000002706ed9fbf152fcc24fa744f727fb3f1e309344f458f6f1ce5ac395785c40b758d1708a19d70e9eb8f04dded74302e302230ca839d9b0a6b512ebaf6180c397ae48a534627a648dc2f3a555ae215d887a38d1983b962a32215a4c8ab01817aed0405f2ebd4571adc68aab5d1be4193d2bedf2d7ec3c0d5623374509efc16a5aac").unwrap();
+    let temp = hex::decode(&input).unwrap();
+    let res = derive_cait_sith_pubkey(&temp, 1000000000000000000);
     assert!(res.is_ok());
 }
 
