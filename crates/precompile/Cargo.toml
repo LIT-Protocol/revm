@@ -26,7 +26,7 @@ revm-primitives = { path = "../primitives", version = "15.1.0", default-features
 once_cell = { version = "1.19", default-features = false, features = ["alloc"] }
 
 # ecRecover
-k256 = { version = "0.13.3", default-features = false, features = ["ecdsa"] }
+k256 = { version = "0.13.3", default-features = false, features = ["ecdsa", "arithmetic"] }
 secp256k1 = { version = ">=0.28, <=0.29", default-features = false, features = [
     "alloc",
     "recovery",
@@ -53,15 +53,31 @@ c-kzg = { version = "1.0.3", default-features = false, optional = true, features
 kzg-rs = { version = "0.2.3", default-features = false, optional = true }
 
 # BLS12-381 precompiles
-blst = { version = "0.3.13", optional = true }
+blst = { version = "0.3.10", optional = true }
 
 # p256verify precompile
-p256 = { version = "0.13.2", optional = true, default-features = false, features = [
+p256 = { version = "0.13.2", default-features = false, features = [
     "ecdsa",
+    "arithmetic"
 ] }
 
 # utils
 cfg-if = { version = "1.0", default-features = false }
+
+# Lit Protocol Precompile Additions
+blake2 = "0.10"
+blsful = { version = "2.5", default-features = false, features = ["rust"] }
+curve25519-dalek = { package = "curve25519-dalek-ml", version = "4.1.1", features = ["digest", "group"] }
+ed25519-dalek = "2.1.0"
+ed448-goldilocks-plus = "0.11"
+ecdsa = "0.16.8"
+jubjub = { package="jubjub-plus" , version = "0.10" }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic", "expose-field", "hash2curve"] }
+num = { version = "0.4.0", default-features = false, features = ["alloc"] }
+num-bigint = "0.4.4"
+hd-keys-curves = { git = "https://github.com/LIT-Protocol/hd-keys-curves.git" }
+elliptic-curve = { version = "0.13.5", features = ["arithmetic", "hash2curve"] }
+sha3 = { version = "0.10.7", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -97,7 +113,7 @@ negate-optimism-default-handler = [
 ]
 
 # Enables the p256verify precompile.
-secp256r1 = ["dep:p256"]
+secp256r1 = []
 
 # These libraries may not work on all no_std platforms as they depend on C.
 
